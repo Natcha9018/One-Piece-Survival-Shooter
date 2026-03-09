@@ -63,39 +63,232 @@ def lerp_col(a, b, t):
     return tuple(int(a[i]+(b[i]-a[i])*t) for i in range(3))
 
 # ══════════════════════════════════════════════════════════
-#  SOUND  (pure pygame, ไม่ต้องใช้ไฟล์ภายนอก)
+#  SOUND ENGINE
+#  — ลองโหลดไฟล์จริงก่อน ถ้าไม่มีใช้ procedural แทน
+#
+#  วางไฟล์เสียงไว้โฟลเดอร์เดียวกับ .py นี้:
+#    punch.wav / punch.mp3   → เสียงหมัด
+#    punch_g2.wav            → เสียงหมัด Gear 2
+#    hit.wav                 → ศัตรูโดนตี
+#    death.wav               → ตาย
+#    gear2.wav               → เปิด Gear 2nd
+#    bgm.mp3 / bgm.wav       → เพลง background
 # ══════════════════════════════════════════════════════════
-class Sound:
-    def __init__(self):
-        self._s = {}
-        try:
-            pygame.mixer.init(44100, -16, 1, 512)
-            self._s['punch']   = self._mk('sq', 220, 0.10, 0.50)
-            self._s['gear2']   = self._mk('sq', 160, 0.22, 0.60)
-            self._s['hit']     = self._mk('sq',  70, 0.09, 0.45)
-            self._s['death']   = self._mk('no',   0, 0.28, 0.55)
-        except Exception:
-            pass
+import os
 
-    def _mk(self, kind, freq, dur, vol):
+class Sound:
+    SR = 44100
+
+    # ชื่อไฟล์ที่รองรับ (ลองตามลำดับ)
+    FILE_MAP = {
+        'punch'   : ['punch.wav',    'punch.mp3',    'hit_punch.wav'],
+        'punch_g2': ['punch_g2.wav', 'punch_heavy.wav', 'punch.wav'],
+        'hit'     : ['hit.wav',      'hit.mp3',      'impact.wav'],
+        'death'   : ['death.wav',    'death.mp3',    'game_over.wav'],
+        'gear2'   : ['gear2.wav',    'gear2.mp3',    'power_up.wav'],
+    }
+    BGM_FILES = ['bgm.mp3', 'bgm.wav', 'background.mp3', 'music.mp3',
+                 'background_music.mp3', 'theme.mp3']
+
+    def __init__(self):
+        self._s   = {}
+        self._bgm = None
+        self._ok  = False
+        try:
+            pygame.mixer.pre_init(self.SR, -16, 2, 1024)
+            pygame.mixer.init()
+            pygame.mixer.set_num_channels(16)
+            self._ok = True
+            self._load_sfx()
+            self._load_bgm()
+        except Exception as e:
+            print(f"[Sound] init failed: {e}")
+
+    def _load_sfx(self):
+        """โหลดไฟล์จริง ถ้าไม่มีสร้าง procedural"""
+        loaded_any_file = False
+        for key, filenames in self.FILE_MAP.items():
+            snd = None
+            for fn in filenames:
+                if os.path.exists(fn):
+                    try:
+                        snd = pygame.mixer.Sound(fn)
+                        snd.set_volume(0.8)
+                        self._s[key] = snd
+                        print(f"[Sound] ✓ โหลดไฟล์: {fn} → {key}")
+                        loaded_any_file = True
+                        break
+                    except Exception as ex:
+                        print(f"[Sound] ✗ โหลดไม่ได้: {fn} ({ex})")
+            if snd is None:
+                # fallback procedural
+                self._s[key] = self._make_procedural(key)
+
+        if not loaded_any_file:
+            print("[Sound] ไม่พบไฟล์เสียง — ใช้ procedural synthesis แทน")
+
+    def _load_bgm(self):
+        """โหลด BGM ด้วย pygame.mixer.music (รองรับ mp3 ยาว)"""
+        for fn in self.BGM_FILES:
+            if os.path.exists(fn):
+                try:
+                    pygame.mixer.music.load(fn)
+                    pygame.mixer.music.set_volume(0.40)
+                    pygame.mixer.music.play(loops=-1)
+                    print(f"[Sound] ✓ BGM: {fn}")
+                    self._bgm = fn
+                    return
+                except Exception as ex:
+                    print(f"[Sound] ✗ BGM โหลดไม่ได้: {fn} ({ex})")
+        # ไม่มีไฟล์ → procedural
+        print("[Sound] ไม่พบไฟล์ BGM — สร้าง procedural BGM")
+        self._build_bgm_procedural()
+
+
+    # ── procedural fallback ───────────────────────────────
+    def _make_procedural(self, key):
         try:
             import numpy as np
-            sr = 44100; n = int(sr*dur)
-            t  = np.linspace(0, dur, n, False)
-            if   kind == 'sq': w = np.sign(np.sin(2*math.pi*freq*t))
-            elif kind == 'no': w = np.random.uniform(-1,1,n)
-            else:              w = np.sin(2*math.pi*freq*t)
-            fade = np.linspace(1, 0, n)
-            pcm  = (w*fade*vol*32767).astype(np.int16)
-            return pygame.sndarray.make_sound(pcm)
-        except Exception:
-            return None
+            SR = self.SR
 
+            def pcm_sound(w, vol=0.85):
+                w = np.clip(w, -1, 1) * vol
+                stereo = np.column_stack([w, w])
+                snd = pygame.sndarray.make_sound((stereo*32767).astype(np.int16))
+                snd.set_volume(vol)
+                return snd
+
+            def fade(w, fi=0.003, fo=0.05):
+                n=len(w); fi=min(int(SR*fi),n); fo=min(int(SR*fo),n)
+                w[:fi]*=np.linspace(0,1,fi); w[-fo:]*=np.linspace(1,0,fo)
+                return w
+
+            if key == 'punch':
+                t=np.linspace(0,0.18,int(SR*0.18),False)
+                w=(np.sin(2*math.pi*90*t)*0.9*np.exp(-t*18)
+                  +np.sign(np.sin(2*math.pi*380*t))*0.5*np.exp(-t*30)
+                  +(2*(t*200%1)-1)*0.3*np.exp(-t*12))
+                return pcm_sound(fade(w.astype(np.float32)))
+
+            elif key == 'punch_g2':
+                t=np.linspace(0,0.22,int(SR*0.22),False)
+                w=(np.sin(2*math.pi*75*t)*1.0*np.exp(-t*14)
+                  +np.sign(np.sin(2*math.pi*420*t))*0.6*np.exp(-t*22)
+                  +np.random.uniform(-0.35,0.35,len(t))*np.exp(-t*18))
+                return pcm_sound(fade(w.astype(np.float32)), 1.0)
+
+            elif key == 'hit':
+                t=np.linspace(0,0.14,int(SR*0.14),False)
+                w=(np.sin(2*math.pi*65*t)*1.0*np.exp(-t*20)
+                  +np.random.uniform(-0.4,0.4,len(t))*np.exp(-t*25))
+                return pcm_sound(fade(w.astype(np.float32)), 0.75)
+
+            elif key == 'death':
+                n=int(SR*0.55); t=np.linspace(0,0.55,n,False)
+                fd=200*np.exp(-t*3)
+                w=np.sin(2*math.pi*np.cumsum(fd)/SR)*0.8
+                w+=np.random.uniform(-0.3,0.3,n)*np.exp(-t*5)
+                return pcm_sound(fade(w.astype(np.float32),0.005,0.15), 0.80)
+
+            elif key == 'gear2':
+                t=np.linspace(0,0.45,int(SR*0.45),False)
+                w=(np.random.uniform(-0.5,0.5,len(t))*np.exp(-t*4)
+                  +np.sin(2*math.pi*55*t)*0.8*(1-np.exp(-t*8))
+                  +np.sign(np.sin(2*math.pi*110*t))*0.5*np.exp(-t*6)
+                  +np.sign(np.sin(2*math.pi*220*t))*0.3*np.exp(-t*9))
+                return pcm_sound(fade(w.astype(np.float32),0.008,0.10), 0.90)
+
+        except Exception as ex:
+            print(f"[Sound] procedural {key} failed: {ex}")
+        return None
+
+    # ── Procedural BGM (fallback) ─────────────────────────
+    def _build_bgm_procedural(self):
+        try:
+            import numpy as np
+            SR=self.SR; BPM=140; beat=60/BPM
+            NOTE={'C3':130.8,'D3':146.8,'E3':164.8,'F3':174.6,
+                  'G3':196.0,'A3':220.0,'B3':246.9,'C4':261.6,
+                  'D4':293.7,'E4':329.6,'F4':349.2,'G4':392.0,
+                  'A4':440.0,'B4':493.9,'C5':523.3,'D5':587.3,
+                  'E5':659.3,'F5':698.5,'G5':784.0,'A5':880.0,'R':0}
+
+            def note(name,db,vol=0.55):
+                dur=db*beat; n=int(SR*dur)
+                f=NOTE.get(name,0)
+                if f==0: return np.zeros(n,dtype=np.float32)
+                t=np.linspace(0,dur,n,False)
+                w=np.sign(np.sin(2*math.pi*f*t))
+                return (w*np.exp(-t*(4/db))*vol).astype(np.float32)
+
+            def bass(name,db,vol=0.50):
+                dur=db*beat; n=int(SR*dur)
+                f=NOTE.get(name,0)
+                if f==0: return np.zeros(n,dtype=np.float32)
+                t=np.linspace(0,dur,n,False)
+                w=2*(t*f%1)-1
+                return (w*np.exp(-t*2)*vol).astype(np.float32)
+
+            def kick(db):
+                dur=db*beat; n=int(SR*dur); t=np.linspace(0,dur,n,False)
+                return (np.sin(2*math.pi*np.cumsum(180*np.exp(-t*40))/SR)*np.exp(-t*20)*0.8).astype(np.float32)
+
+            def snare(db):
+                dur=db*beat; n=int(SR*dur); t=np.linspace(0,dur,n,False)
+                return ((np.random.uniform(-1,1,n)*0.6+np.sin(2*math.pi*200*t)*0.3)*np.exp(-t*30)*0.7).astype(np.float32)
+
+            def hihat(db,vol=0.22):
+                dur=db*beat; n=int(SR*dur); t=np.linspace(0,dur,n,False)
+                return (np.random.uniform(-1,1,n)*np.exp(-t*80)*vol).astype(np.float32)
+
+            mel=np.concatenate([note(*x) for x in [
+                ('A4',1),('C5',.5),('E5',.5),('A5',1),('G5',.5),('E5',.5),
+                ('F4',1),('A4',.5),('C5',.5),('D5',1),('C5',.5),('A4',.5),
+                ('C5',1),('E5',.5),('G5',.5),('E5',1),('D5',.5),('C5',.5),
+                ('G4',.5),('B4',.5),('D5',.5),('G5',.5),('D5',1),('B4',1),
+                ('A4',.5),('E5',.5),('A5',1),('G5',.5),('E5',.5),('D5',1),
+                ('F4',.5),('C5',.5),('F5',1),('E5',.5),('D5',.5),('C5',1),
+                ('E5',1),('D5',.5),('C5',.5),('B4',1),('A4',1),
+                ('G4',.5),('B4',.5),('D5',1),('G5',2),
+            ]])
+            bs=np.concatenate([bass(*x) for x in [
+                ('A3',2),('A3',2),('F3',2),('F3',2),
+                ('C3',2),('C3',2),('G3',2),('G3',2),
+                ('A3',2),('A3',2),('F3',2),('F3',2),
+                ('C3',2),('E3',2),('A3',4),
+            ]])
+            L=len(mel)
+            bk1=np.concatenate([kick(.5),np.zeros(int(SR*beat*.5)),np.zeros(int(SR*beat)),
+                                 kick(.5),np.zeros(int(SR*beat*.5)),np.zeros(int(SR*beat))])
+            sn1=np.concatenate([np.zeros(int(SR*beat)),snare(.5),np.zeros(int(SR*beat*.5)),
+                                 np.zeros(int(SR*beat)),snare(.5),np.zeros(int(SR*beat*.5))])
+            hh1=np.tile(np.concatenate([hihat(.5),hihat(.5)]),4)
+            bars=math.ceil(L/len(bk1))+1
+            bk=np.tile(bk1,bars)[:L]; sn=np.tile(sn1,bars)[:L]; hh=np.tile(hh1,bars)[:L]
+            bs2=np.pad(bs,(0,max(0,L-len(bs))))[:L]
+            mix=np.clip(mel+bs2*0.8+bk+sn+hh,-1,1)
+            fi=int(SR*.05); fo=int(SR*.1)
+            mix[:fi]*=np.linspace(0,1,fi); mix[-fo:]*=np.linspace(1,0,fo)
+            stereo=np.column_stack([mix,mix])
+            pcm=(stereo*28000).astype(np.int16)
+            self._bgm_snd=pygame.sndarray.make_sound(pcm)
+            self._bgm_snd.play(loops=-1)
+            self._bgm_snd.set_volume(0.35)
+            print("[Sound] ✓ Procedural BGM started")
+        except Exception as ex:
+            print(f"[Sound] procedural BGM failed: {ex}")
+
+    # ── public API ───────────────────────────────────────
     def play(self, name):
         s = self._s.get(name)
         if s:
             try: s.play()
             except: pass
+
+    def set_bgm_vol(self, v):
+        try: pygame.mixer.music.set_volume(clamp(v,0,1))
+        except: pass
+
 
 # ══════════════════════════════════════════════════════════
 #  PARTICLE
@@ -321,7 +514,7 @@ class Player:
         if self.pistol_t > 0: return None
         self.pistol_t   = cd
         self.punch_anim = cd * 1.2
-        sound.play('punch')
+        sound.play('punch_g2' if self.in_gear2 else 'punch')
         dx, dy = norm(mx - self.x, my - self.y)
         self.facing = (dx, dy)
         dmg_mult = self.G2_DMG_MULT if self.in_gear2 else 1.0
